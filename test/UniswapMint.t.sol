@@ -21,7 +21,7 @@ contract UniswapPositionTest is Test {
     
     // Block numbers for the simulation
     // We start at an older block to mint
-    uint256 private constant START_BLOCK = 23422403; 
+    uint256 private constant START_BLOCK = 20030246; 
     // We "time travel" to a future block to simulate swaps and fee accumulation
     uint256 private constant END_BLOCK = 23438403;
     
@@ -58,15 +58,21 @@ contract UniswapPositionTest is Test {
     ///         3. Withdraw liquidity and collect any accrued fees.
     ///         4. Burn the position NFT.
     function testCompleteFlow() public {
-        // ======================= STEP 1: MINT POSITION =======================
+               // ======================= STEP 1: MINT POSITION =======================
         
         // Give the test account a large starting balance of USDC and WETH
         deal(USDC, testAccount, 100_000 * 1e6); // 100,000 USDC
         deal(WETH, testAccount, 100 ether);     // 100 WETH
 
-        // Store initial balances for later verification
+        // Store and log initial balances for later verification
         uint256 usdcBalanceBefore = IERC20(USDC).balanceOf(testAccount);
         uint256 wethBalanceBefore = IERC20(WETH).balanceOf(testAccount);
+        
+        emit log("--- Balances Before Mint ---");
+        emit log_named_decimal_uint("Initial USDC Balance", usdcBalanceBefore, 6);
+        emit log_named_decimal_uint("Initial WETH Balance", wethBalanceBefore, 18);
+        emit log("-----------------------------");
+
 
         // Impersonate the test account to perform actions
         vm.startPrank(testAccount);
@@ -82,7 +88,7 @@ contract UniswapPositionTest is Test {
             token1: WETH, 
             fee: POOL_FEE,
             tickLower: 191880, // Tick must be divisible by tickSpacing (60 for 0.3% fee)
-            tickUpper: 194100, // Tick must be divisible by tickSpacing (60 for 0.3% fee)
+            tickUpper: 194220, // Tick must be divisible by tickSpacing (60 for 0.3% fee)
             amount0Desired: 2000 * 1e6, // 2000 USDC
             amount1Desired: 1 ether,       // 1 WETH
             amount0Min: 0,
@@ -92,23 +98,35 @@ contract UniswapPositionTest is Test {
         });
 
         // Execute the mint transaction
-        (uint256 tokenId, uint128 liquidity, , ) = nfpm.mint(params);
+        (uint256 tokenId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) = nfpm.mint(params);
         
         // Stop impersonating the test account
         vm.stopPrank();
 
         // --- Verification & Logging for Step 1 ---
         assertTrue(tokenId > 0, "Minting failed, tokenId is 0");
-        emit log_named_uint("  [STEP 1] Position minted with Token ID", tokenId);
+        
+        // Get and log balances immediately after the mint transaction
+        uint256 usdcBalanceAfter = IERC20(USDC).balanceOf(testAccount);
+        uint256 wethBalanceAfter = IERC20(WETH).balanceOf(testAccount);
 
+        emit log_named_uint("[STEP 1] Position minted with Token ID", tokenId);
+        emit log_named_uint("   - Liquidity Created", liquidity);
+        emit log("--- Amounts Actually Used in Mint ---");
+        emit log_named_decimal_uint("USDC Used (amount0)", amount0Used, 6);
+        emit log_named_decimal_uint("WETH Used (amount1)", amount1Used, 18);
+        emit log("------------------------------------");
+        emit log("--- Balances After Mint ---");
+        emit log_named_decimal_uint("Final USDC Balance", usdcBalanceAfter, 6);
+        emit log_named_decimal_uint("Final WETH Balance", wethBalanceAfter, 18);
+        emit log("----------------------------");
 
         // ======================= STEP 2: SIMULATE TIME =======================
 
         // Fast-forward the blockchain to the END_BLOCK
         // This simulates time passing, during which swaps would happen and fees would accrue
         vm.roll(END_BLOCK);
-        emit log_named_string(" [STEP 2] Time-traveled to block", toString(END_BLOCK));
-
+      
         // Check for any fees that have accrued (optional, for debugging)
         // In this simple simulation without actual swaps, fees will likely be 0.
         (, , , , , , , , , , uint128 feesOwed0, uint128 feesOwed1) = nfpm.positions(tokenId);
@@ -116,12 +134,22 @@ contract UniswapPositionTest is Test {
         emit log_named_uint("   - Accrued WETH fees", feesOwed1);
 
 
-        // ======================= STEP 3: BURN & COLLECT =======================
+     // ======================= STEP 3: BURN & COLLECT =======================
 
+        emit log(" "); // Add a blank line for readability
+        emit log("--- Balances Before Withdraw ---");
+        uint256 usdcBalanceBeforeWithdraw = IERC20(USDC).balanceOf(testAccount);
+        uint256 wethBalanceBeforeWithdraw = IERC20(WETH).balanceOf(testAccount);
+        emit log_named_decimal_uint("USDC Balance", usdcBalanceBeforeWithdraw, 6);
+        emit log_named_decimal_uint("WETH Balance", wethBalanceBeforeWithdraw, 18);
+        emit log("-------------------------------");
+        
         // Impersonate the test account again to withdraw
         vm.startPrank(testAccount);
 
-        // 3.1 Decrease liquidity to zero, which "unlocks" the underlying tokens
+        // --- 3.1 Decrease liquidity to zero ---
+        // This action "unlocks" the underlying tokens from the position,
+        // but DOES NOT transfer them to the wallet yet. They are now pending collection.
         (uint256 amount0Removed, uint256 amount1Removed) = nfpm.decreaseLiquidity(
             INonfungiblePositionManager.DecreaseLiquidityParams({
                 tokenId: tokenId,
@@ -131,8 +159,24 @@ contract UniswapPositionTest is Test {
                 deadline: block.timestamp + 1 days
             })
         );
+        
+        emit log(" [STEP 3.1] Liquidity Decreased to Zero");
+        emit log("--- Amounts Unlocked from Position ---");
+        emit log_named_decimal_uint("USDC Unlocked (amount0)", amount0Removed, 6);
+        emit log_named_decimal_uint("WETH Unlocked (amount1)", amount1Removed, 18);
+        emit log("-------------------------------------");
 
-        // 3.2 Collect all pending funds (the unlocked tokens from decreaseLiquidity + any accrued fees)
+        // Let's check the balance right after decreasing liquidity.
+        // It SHOULD NOT have changed yet!
+        emit log("--- Balances After DecreaseLiquidity (Before Collect) ---");
+        emit log_named_decimal_uint("USDC Balance", IERC20(USDC).balanceOf(testAccount), 6);
+        emit log_named_decimal_uint("WETH Balance", IERC20(WETH).balanceOf(testAccount), 18);
+        emit log_string("   (Note: Balances are unchanged, as expected)");
+        emit log("------------------------------------------------------");
+
+
+        // --- 3.2 Collect all pending funds ---
+        // This action transfers the unlocked tokens AND any accrued fees to the recipient's wallet.
         (uint256 amount0Collected, uint256 amount1Collected) = nfpm.collect(
             INonfungiblePositionManager.CollectParams({
                 tokenId: tokenId,
@@ -142,54 +186,43 @@ contract UniswapPositionTest is Test {
             })
         );
         
-        // 3.3 Burn the now-empty position NFT
+        emit log(" [STEP 3.2] Funds Collected");
+        emit log("--- Amounts Transferred to Wallet ---");
+        emit log_named_decimal_uint("USDC Collected (liquidity + fees)", amount0Collected, 6);
+        emit log_named_decimal_uint("WETH Collected (liquidity + fees)", amount1Collected, 18);
+        emit log("------------------------------------");
+
+        
+        // --- 3.3 Burn the now-empty position NFT ---
         nfpm.burn(tokenId);
+        emit log("[STEP 3.3] Position NFT Burned");
 
         // Stop impersonating
         vm.stopPrank();
 
-        // --- Logging for Step 3 ---
-        emit log("  [STEP 3] Position withdrawn and burned");
-        emit log_named_uint("   - Total USDC collected (liquidity + fees)", amount0Collected);
-        emit log_named_uint("   - Total WETH collected (liquidity + fees)", amount1Collected);
+
+       
+        // ======================= STEP 4: FINAL VERIFICATION =======================
         
-
-               // ======================= STEP 4: FINAL VERIFICATION =======================
-
-        // Get the final token balances of the test account
-        uint256 usdcBalanceAfter = IERC20(USDC).balanceOf(testAccount);
-        uint256 wethBalanceAfter = IERC20(WETH).balanceOf(testAccount);
-
-        // 使用 int256 来安全地计算余额变化，避免下溢
+        emit log(" "); // Add a blank line
+        emit log("--- Balances After Full Withdraw & Collect ---");
+        usdcBalanceAfter = IERC20(USDC).balanceOf(testAccount);
+        wethBalanceAfter = IERC20(WETH).balanceOf(testAccount);
+        emit log_named_decimal_uint("Final USDC Balance", usdcBalanceAfter, 6);
+        emit log_named_decimal_uint("Final WETH Balance", wethBalanceAfter, 18);
+        emit log("---------------------------------------------");
+        
+        // Calculate the net change over the entire lifecycle
         int256 usdcChange = int256(usdcBalanceAfter) - int256(usdcBalanceBefore);
         int256 wethChange = int256(wethBalanceAfter) - int256(wethBalanceBefore);
         
-        emit log(" [STEP 4] Final balance verification");
-        emit log_named_int("   - Net USDC change", usdcChange);
-        emit log_named_int("   - Net WETH change", wethChange);
+        emit log("[STEP 4] Final balance verification");
+        emit log_named_decimal_int("   - Net USDC change (wei)", usdcChange, 0); // Log wei change for precision
+        emit log_named_decimal_int("   - Net WETH change (wei)", wethChange, 0); // Log wei change for precision
         
-        // 验证逻辑可以保持不变，因为我们只是检查最终余额是否大于0
+        // Final assertions
         assertTrue(usdcBalanceAfter > 0, "Final USDC balance is zero");
         assertTrue(wethBalanceAfter > 0, "Final WETH balance is zero");
     }
 
-    // Helper function to convert uint to string for logging
-    function toString(uint256 value) internal pure returns (string memory) {
-        if (value == 0) {
-            return "0";
-        }
-        uint256 temp = value;
-        uint256 digits;
-        while (temp != 0) {
-            digits++;
-            temp /= 10;
-        }
-        bytes memory buffer = new bytes(digits);
-        while (value != 0) {
-            digits -= 1;
-            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
-            value /= 10;
-        }
-        return string(buffer);
-    }
 }
